@@ -1,0 +1,222 @@
+# house_model_blender.py
+# Blender Python script (bpy) to create a simple 3D architectural model
+# Usage:
+#   From Blender Text Editor: open this file and Run Script
+#   Or from terminal: blender --background --python /path/to/house_model_blender.py
+#
+# The script:
+# - clears the scene
+# - creates floor and outer walls
+# - creates interior partitions according to the plan
+# - places simple furniture blocks (sofa, beds, counter, fridge, sinks, washer, closet)
+# - assigns basic materials
+# - exports an OBJ named house_model.obj into the same folder as the script
+#
+import bpy
+import os
+import math
+from mathutils import Vector
+
+# ---------- Config ----------
+WALL_THICK = 0.15
+WALL_H = 3.0
+FLOOR_THICK = 0.02
+# Export file path (same folder as this script)
+try:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+except Exception:
+    # If __file__ not available (rare), fallback to Blender file directory
+    SCRIPT_DIR = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+EXPORT_OBJ_PATH = os.path.join(SCRIPT_DIR, "house_model.obj")
+
+# ---------- Helpers ----------
+def clean_scene():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    # remove unused meshes and materials
+    for mesh in list(bpy.data.meshes):
+        bpy.data.meshes.remove(mesh)
+    for mat in list(bpy.data.materials):
+        bpy.data.materials.remove(mat)
+
+def create_cube(name, size_x, size_y, size_z, location=(0,0,0), rotation=(0,0,0)):
+    bpy.ops.mesh.primitive_cube_add(size=1, location=location, rotation=rotation)
+    obj = bpy.context.object
+    obj.name = name
+    obj.scale = (size_x/2.0, size_y/2.0, size_z/2.0)
+    bpy.ops.object.transform_apply(scale=True, location=False, rotation=False)
+    return obj
+
+def create_wall_segment(p1, p2, thickness=WALL_THICK, height=WALL_H, name="Wall"):
+    # p1, p2 are (x,y)
+    x1,y1 = p1; x2,y2 = p2
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx,dy)
+    midx = (x1 + x2)/2.0
+    midy = (y1 + y2)/2.0
+    angle = math.atan2(dy, dx)
+    # create cube and rotate
+    obj = create_cube(name, length, thickness, height, location=(midx, midy, height/2.0))
+    obj.rotation_euler[2] = angle
+    return obj
+
+def create_floor(size_x, size_y, thickness=FLOOR_THICK, location=(0,0,0)):
+    return create_cube("Floor", size_x, size_y, thickness, location=(location[0]+size_x/2.0, location[1]+size_y/2.0, -thickness/2.0))
+
+def make_material(name, color):
+    mat = bpy.data.materials.new(name)
+    # Blender 2.8+ use principled BSDF by default, but setting diffuse_color works for viewport
+    mat.diffuse_color = (color[0], color[1], color[2], 1.0)
+    # try to set Principled BSDF base color as well
+    if mat.node_tree:
+        nodes = mat.node_tree.nodes
+        principled = nodes.get("Principled BSDF")
+        if principled:
+            principled.inputs["Base Color"].default_value = (color[0], color[1], color[2], 1.0)
+    return mat
+
+# ---------- Build scene ----------
+clean_scene()
+
+# House footprint (match plan): width X = 6m (left-right), depth Y = 15m (front-back)
+HOUSE_W = 6.0
+HOUSE_D = 15.0
+
+# Create floor (origin at front-left corner)
+floor = create_floor(HOUSE_W, HOUSE_D, thickness=FLOOR_THICK, location=(0.0, 0.0, 0.0))
+mat_floor = make_material("FloorMat", (0.85, 0.82, 0.78))
+floor.data.materials.append(mat_floor)
+
+# Outer walls (clockwise from front-left)
+outer_pts = [(0.0,0.0),(HOUSE_W,0.0),(HOUSE_W,HOUSE_D),(0.0,HOUSE_D),(0.0,0.0)]
+for i in range(len(outer_pts)-1):
+    create_wall_segment(outer_pts[i], outer_pts[i+1], name=f"OuterWall_{i}")
+
+# Interior layout based on your plan:
+# Left column (X 0..3) has sala (front) and 3 quartos stacked behind
+# Right column (X 3..6) contains corridor (3..4), bathrooms, lavanderia, cozinha
+# Corridor width 1.0m between X=3 and X=4
+
+X_BED_RIGHT = 3.0
+X_CORR_RIGHT = 4.0
+
+# Horizontal divisions Y coordinates (approx, from front (0) to back (15))
+# Sala depth 4m (Y 0..4), then quartos:
+Y_SALA_END = 4.0
+Y_Q1_END = 7.0  # quarto1 4..7
+Y_Q2_END = 10.0 # quarto2 7..10
+Y_Q3_END = 13.0 # quarto3 10..13
+Y_BACK = 15.0   # remainder to back (bath2 may use 13..15)
+
+# Create partition wall between left and right zones (vertical) from front to Y=13
+create_wall_segment((X_BED_RIGHT,0.0),(X_BED_RIGHT,Y_Q3_END), name="Bed_to_right")
+
+# Corridor right boundary (X=4) from front to Y=13
+create_wall_segment((X_CORR_RIGHT,0.0),(X_CORR_RIGHT,Y_Q3_END), name="Corr_right")
+
+# Horizontal separators between bedrooms
+create_wall_segment((0.0,Y_Q1_END),(X_BED_RIGHT,Y_Q1_END), name="Bedroom_sep1")
+create_wall_segment((0.0,Y_Q2_END),(X_BED_RIGHT,Y_Q2_END), name="Bedroom_sep2")
+
+# Small short wall at top of bedrooms to create corridor turn (cosmetic)
+create_wall_segment((X_BED_RIGHT,Y_Q3_END),(X_CORR_RIGHT,Y_Q3_END), name="Top_short_wall")
+
+# Bathrooms and lavanderia on right side (approx placements):
+# We'll position:
+# - Lavanderia: X 4..6, Y 8..11 (2x3)
+# - Banheiro 1: X 4..6, Y 11..13 (2x2)
+# - Banheiro 2: X 4..6, Y 13..15 (2x2)
+# Create enclosure walls for these boxes (they overlap; outer walls already exist)
+def rect_walls(x0,y0,x1,y1, prefix):
+    create_wall_segment((x0,y0),(x1,y0), name=prefix+"_bot")
+    create_wall_segment((x1,y0),(x1,y1), name=prefix+"_right")
+    create_wall_segment((x1,y1),(x0,y1), name=prefix+"_top")
+    create_wall_segment((x0,y1),(x0,y0), name=prefix+"_left")
+
+rect_walls(4.0, 8.0, 6.0, 11.0, "Lav")   # lavanderia 2x3
+rect_walls(4.0, 11.0, 6.0, 13.0, "Bath1") # banheiro1 2x2
+rect_walls(4.0, 13.0, 6.0, 15.0, "Bath2") # banheiro2 2x2
+
+# Door placeholders (thin frames) - these are visual markers only
+def add_door_marker(center_x, center_y, width=0.9, height=2.05):
+    # small thin cube representing door opening
+    return create_cube("DoorMarker", width, 0.05, height, location=(center_x, center_y, height/2.0))
+
+# Example: main entrance roughly centered at X=1.5 (front wall)
+add_door_marker(1.5, 0.01)
+
+# Doors from corridor into bedrooms (centered on each bedroom)
+add_door_marker(1.5, Y_SALA_END + 0.0)      # between sala and corridor
+add_door_marker(1.5, (Y_Q1_END+Y_SALA_END)/2.0 + 0.0)  # quarto1
+add_door_marker(1.5, (Y_Q2_END+Y_Q1_END)/2.0 + 0.0)   # quarto2
+add_door_marker(1.5, (Y_Q3_END+Y_Q2_END)/2.0 + 0.0)   # quarto3
+
+# Door to lavanderia and bathrooms (approx)
+add_door_marker(4.5, 9.0)   # lavanderia
+add_door_marker(4.5, 11.9)  # bath1
+add_door_marker(4.5, 13.9)  # bath2
+
+# ---------- Furniture (simple blocks) ----------
+# Sala (left-front): sofa and TV rack
+sofa = create_cube("Sofa", 2.5, 0.9, 0.8, location=(1.5, 1.6, 0.4))
+tv_rack = create_cube("TV_Rack", 1.2, 0.4, 0.6, location=(1.5, 3.6, 0.3))
+
+# Cozinha (right-front): counter and fridge
+kitchen_counter = create_cube("Kitchen_Counter", 1.8, 0.6, 0.9, location=(4.9, 2.6, 0.45))
+fridge = create_cube("Fridge", 0.7, 0.7, 1.7, location=(5.5, 1.0, 0.85))
+
+# Beds: Q1 (double), Q2 and Q3 (single)
+bed_q1 = create_cube("Bed_Q1", 1.6, 2.0, 0.45, location=(1.5, (Y_SALA_END+Y_Q1_END)/2.0, 0.225))
+bed_q2 = create_cube("Bed_Q2", 1.0, 2.0, 0.45, location=(1.5, (Y_Q1_END+Y_Q2_END)/2.0, 0.225))
+bed_q3 = create_cube("Bed_Q3", 1.0, 2.0, 0.45, location=(1.5, (Y_Q2_END+Y_Q3_END)/2.0, 0.225))
+
+# Wardrobes along left walls in bedrooms (simple blocks)
+ward_q1 = create_cube("Ward_Q1", 0.5, 1.8, 2.0, location=(0.4, (Y_SALA_END+Y_Q1_END)/2.0, 1.0))
+ward_q2 = create_cube("Ward_Q2", 0.5, 1.8, 2.0, location=(0.4, (Y_Q1_END+Y_Q2_END)/2.0, 1.0))
+ward_q3 = create_cube("Ward_Q3", 0.5, 1.8, 2.0, location=(0.4, (Y_Q2_END+Y_Q3_END)/2.0, 1.0))
+
+# Bathrooms fixtures (sinks and toilets)
+bath1_sink = create_cube("Bath1_Sink", 0.6, 0.4, 0.8, location=(4.6, 11.3, 0.4))
+bath1_toilet = create_cube("Bath1_Toilet", 0.4, 0.6, 0.4, location=(5.2, 11.3, 0.2))
+
+bath2_sink = create_cube("Bath2_Sink", 0.6, 0.4, 0.8, location=(4.6, 13.3, 0.4))
+bath2_toilet = create_cube("Bath2_Toilet", 0.4, 0.6, 0.4, location=(5.2, 13.3, 0.2))
+
+# Lavanderia: tank and washer
+tank = create_cube("Tank", 0.6, 0.5, 0.9, location=(4.6, 9.5, 0.45))
+washer = create_cube("Washer", 0.6, 0.6, 0.9, location=(5.4, 9.5, 0.45))
+
+# Closet (1x1 near top bedroom) - simple shelf block
+closet_shelf = create_cube("Closet_Shelf", 0.9, 0.3, 2.0, location=(2.6, 12.2, 1.0))
+
+# ---------- Materials ----------
+mat_wall = make_material("WallMat", (0.95,0.95,0.95))
+mat_wood = make_material("WoodMat", (0.58,0.4,0.25))
+mat_metal = make_material("MetalMat", (0.3,0.3,0.32))
+mat_fabric = make_material("FabricMat", (0.7,0.2,0.2))
+
+# Assign materials heuristically
+for obj in bpy.data.objects:
+    if obj.name.startswith("OuterWall") or obj.name.startswith("Bed_to_right") or obj.name.startswith("Part") or obj.name.startswith("Bedroom_sep") or obj.name.startswith("Top_short_wall"):
+        if obj.data and len(obj.data.materials)==0:
+            obj.data.materials.append(mat_wall)
+    if obj.name.startswith("Floor") and obj.data and len(obj.data.materials)==0:
+        obj.data.materials.append(mat_floor)
+    if obj.name.startswith("Sofa") or obj.name.startswith("Bed") or obj.name.startswith("TV_Rack"):
+        if obj.data and len(obj.data.materials)==0:
+            obj.data.materials.append(mat_fabric)
+    if obj.name.startswith("Ward") or obj.name.startswith("Kitchen_Counter") or obj.name.startswith("Closet_Shelf"):
+        if obj.data and len(obj.data.materials)==0:
+            obj.data.materials.append(mat_wood)
+    if obj.name.startswith("Fridge") or obj.name.startswith("Washer"):
+        if obj.data and len(obj.data.materials)==0:
+            obj.data.materials.append(mat_metal)
+
+# ---------- Export (OBJ) ----------
+# Select all objects and export
+for o in bpy.data.objects:
+    o.select_set(True)
+bpy.ops.export_scene.obj(filepath=EXPORT_OBJ_PATH, use_materials=True, path_mode='COPY')
+
+print("Export complete. OBJ saved to:", EXPORT_OBJ_PATH)
